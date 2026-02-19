@@ -34,7 +34,7 @@
   </style>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100 selection:bg-cyan-500/40">
-  <div class="relative min-h-screen overflow-hidden pb-56 sm:pb-64 lg:pb-0">
+  <div id="appShell" class="relative min-h-screen overflow-hidden pb-56 sm:pb-64 lg:pb-0">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(56,189,248,0.15),transparent_35%),radial-gradient(circle_at_80%_10%,rgba(14,116,144,0.15),transparent_30%),radial-gradient(circle_at_50%_100%,rgba(15,23,42,0.85),rgba(2,6,23,1))]"></div>
 
     <div
@@ -121,9 +121,20 @@
       </aside>
     </main>
 
-    <section class="fixed bottom-4 right-4 z-20 w-[min(92vw,360px)] rounded-xl border border-slate-700/70 bg-slate-950/90 p-3 shadow-[0_0_35px_rgba(2,132,199,0.25)] backdrop-blur">
-      <p class="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200">ISS Live HD Earth Viewing</p>
-      <div class="mt-2 aspect-video overflow-hidden rounded-lg border border-slate-700/70 bg-black">
+    <section id="liveStreamPanel" class="fixed bottom-4 right-4 z-20 w-[min(92vw,360px)] rounded-xl border border-slate-700/70 bg-slate-950/90 p-3 shadow-[0_0_35px_rgba(2,132,199,0.25)] backdrop-blur">
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200">ISS Live HD Earth Viewing</p>
+        <button
+          id="liveStreamToggleBtn"
+          type="button"
+          aria-controls="liveStreamBody"
+          aria-expanded="true"
+          class="rounded-md border border-slate-600/70 px-2 py-1 text-[11px] font-medium text-slate-200 transition hover:border-cyan-300/70 hover:text-cyan-200"
+        >
+          Hide
+        </button>
+      </div>
+      <div id="liveStreamBody" class="mt-2 aspect-video overflow-hidden rounded-lg border border-slate-700/70 bg-black">
         <iframe
           class="h-full w-full"
           src="https://www.youtube.com/embed/86YLFOog4GM"
@@ -159,6 +170,7 @@
     const MARKER_ANIMATION_MS = 4500;
     const PROXIMITY_THRESHOLD_KM = 1000;
     const ASTRO_MANUAL_REFRESH_COOLDOWN_MS = 10000;
+    const LIVE_STREAM_COLLAPSE_HEIGHT_PX = 760;
 
     const statusEl = document.getElementById("status");
     const statusMessageEl = document.getElementById("statusMessage");
@@ -173,6 +185,9 @@
     const refreshAstrosBtnEl = document.getElementById("refreshAstrosBtn");
     const proximityBannerEl = document.getElementById("proximityBanner");
     const proximityLiveEl = document.getElementById("proximityLive");
+    const liveStreamPanelEl = document.getElementById("liveStreamPanel");
+    const liveStreamBodyEl = document.getElementById("liveStreamBody");
+    const liveStreamToggleBtnEl = document.getElementById("liveStreamToggleBtn");
 
     const map = L.map("map", {
       zoomControl: true,
@@ -214,6 +229,7 @@
     let latestIssPosition = null;
     let userLocationWatchId = null;
     let astroManualCooldownTimerId = null;
+    let isLiveStreamCollapsed = false;
 
     function setStatus(kind, message = "") {
       const palette = {
@@ -264,6 +280,24 @@
     function setAstroRefreshButtonState({ disabled, label }) {
       refreshAstrosBtnEl.disabled = disabled;
       refreshAstrosBtnEl.textContent = label;
+    }
+
+    function setLiveStreamCollapsed(collapsed) {
+      isLiveStreamCollapsed = collapsed;
+      liveStreamBodyEl.classList.toggle("hidden", collapsed);
+      liveStreamPanelEl.classList.toggle("w-[min(92vw,360px)]", !collapsed);
+      liveStreamPanelEl.classList.toggle("w-auto", collapsed);
+      liveStreamToggleBtnEl.setAttribute("aria-expanded", String(!collapsed));
+      liveStreamToggleBtnEl.textContent = collapsed ? "Show" : "Hide";
+    }
+
+    function maybeAutoCollapseLiveStream() {
+      const isSmallLayout = window.matchMedia("(max-width: 1024px)").matches;
+      const isShortViewport = window.innerHeight < LIVE_STREAM_COLLAPSE_HEIGHT_PX;
+
+      if (isSmallLayout || isShortViewport) {
+        setLiveStreamCollapsed(true);
+      }
     }
 
     function renderAstronautList(people) {
@@ -374,10 +408,10 @@
       animationFrameId = requestAnimationFrame(step);
     }
 
-    async function fetchIssPosition() {
+    async function fetchWithFallback(endpoints, parseFn, fallbackMessage) {
       let lastError = null;
 
-      for (const endpoint of ISS_API_ENDPOINTS) {
+      for (const endpoint of endpoints) {
         try {
           const response = await fetch(endpoint, { cache: "no-store" });
 
@@ -386,7 +420,19 @@
           }
 
           const data = await response.json();
+          return parseFn(data);
+        } catch (error) {
+          lastError = error;
+        }
+      }
 
+      throw lastError || new Error(fallbackMessage);
+    }
+
+    async function fetchIssPosition() {
+      return fetchWithFallback(
+        ISS_API_ENDPOINTS,
+        (data) => {
           if (
             data.message !== "success" ||
             !data.iss_position ||
@@ -408,27 +454,15 @@
             lng,
             timestamp: Number(data.timestamp || Math.floor(Date.now() / 1000)),
           };
-        } catch (error) {
-          lastError = error;
-        }
-      }
-
-      throw lastError || new Error("Unable to fetch ISS data");
+        },
+        "Unable to fetch ISS data"
+      );
     }
 
     async function fetchAstros() {
-      let lastError = null;
-
-      for (const endpoint of ASTRO_ENDPOINTS) {
-        try {
-          const response = await fetch(endpoint, { cache: "no-store" });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const data = await response.json();
-
+      return fetchWithFallback(
+        ASTRO_ENDPOINTS,
+        (data) => {
           if (!Array.isArray(data.people)) {
             throw new Error("Unexpected astronaut response");
           }
@@ -444,12 +478,9 @@
             people,
             number: Number.isFinite(Number(data.number)) ? Number(data.number) : people.length,
           };
-        } catch (error) {
-          lastError = error;
-        }
-      }
-
-      throw lastError || new Error("Unable to fetch astronaut data");
+        },
+        "Unable to fetch astronaut data"
+      );
     }
 
     function requestUserLocation() {
@@ -567,14 +598,20 @@
 
     setStatus("init", "Bootstrapping map and telemetry");
     setAstroRefreshButtonState({ disabled: false, label: "Refresh Astronauts" });
+    setLiveStreamCollapsed(false);
     refreshAstrosBtnEl.addEventListener("click", () => {
       if (refreshAstrosBtnEl.disabled) return;
       refreshAstros({ manual: true });
     });
+    liveStreamToggleBtnEl.addEventListener("click", () => {
+      setLiveStreamCollapsed(!isLiveStreamCollapsed);
+    });
+    window.addEventListener("resize", maybeAutoCollapseLiveStream);
 
     requestUserLocation();
     refreshIss();
     refreshAstros();
+    maybeAutoCollapseLiveStream();
 
     setInterval(refreshIss, POLL_INTERVAL_MS);
     setInterval(refreshAstros, ASTRO_REFRESH_MS);
@@ -584,6 +621,9 @@
         navigator.geolocation.clearWatch(userLocationWatchId);
       }
     });
+
+    map.on("dragstart", maybeAutoCollapseLiveStream);
+    map.on("zoomstart", maybeAutoCollapseLiveStream);
   </script>
 </body>
 </html>
