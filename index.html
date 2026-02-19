@@ -76,7 +76,7 @@
           </section>
 
           <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-4 text-xs text-slate-400">
-            <p>Source: <code class="text-cyan-300">http://api.open-notify.org/iss-now.json</code></p>
+            <p>Source: <code class="text-cyan-300">Open Notify (HTTPS-safe proxy on secure pages)</code></p>
             <p class="mt-2">Polling interval: <span class="text-slate-200">5 seconds</span></p>
           </section>
         </div>
@@ -85,6 +85,16 @@
   </div>
 
   <script>
+    const OPEN_NOTIFY_URL = "http://api.open-notify.org/iss-now.json";
+    const OPEN_NOTIFY_PROXY_URL = `https://api.allorigins.win/raw?url=${encodeURIComponent(OPEN_NOTIFY_URL)}`;
+    const ISS_API_ENDPOINTS =
+      window.location.protocol === "https:"
+        ? [OPEN_NOTIFY_PROXY_URL]
+        : [OPEN_NOTIFY_URL, OPEN_NOTIFY_PROXY_URL];
+
+    const POLL_INTERVAL_MS = 5000;
+    const MARKER_ANIMATION_MS = 4500;
+
     const statusEl = document.getElementById("status");
     const statusMessageEl = document.getElementById("statusMessage");
     const latitudeEl = document.getElementById("latitude");
@@ -149,9 +159,7 @@
     function updatePanel({ lat, lng, timestamp }) {
       latitudeEl.textContent = lat.toFixed(5);
       longitudeEl.textContent = lng.toFixed(5);
-
-      const formatted = new Date(timestamp * 1000).toLocaleString();
-      updatedAtEl.textContent = formatted;
+      updatedAtEl.textContent = new Date(timestamp * 1000).toLocaleString();
     }
 
     function animateMarker(fromLatLng, toLatLng, durationMs) {
@@ -161,18 +169,34 @@
         cancelAnimationFrame(animationFrameId);
       }
 
+      const currentBounds = map.getBounds().pad(0.2);
+      if (!currentBounds.contains([toLatLng.lat, toLatLng.lng])) {
+        map.panTo([toLatLng.lat, toLatLng.lng], { animate: true });
+      }
+
       const start = performance.now();
+      let deltaLng = toLatLng.lng - fromLatLng.lng;
+
+      if (deltaLng > 180) {
+        deltaLng -= 360;
+      } else if (deltaLng < -180) {
+        deltaLng += 360;
+      }
 
       function step(now) {
         const elapsed = now - start;
         const progress = Math.min(elapsed / durationMs, 1);
 
         const lat = fromLatLng.lat + (toLatLng.lat - fromLatLng.lat) * progress;
-        const lng = fromLatLng.lng + (toLatLng.lng - fromLatLng.lng) * progress;
-        const interpolated = { lat, lng };
+        let lng = fromLatLng.lng + deltaLng * progress;
 
-        issMarker.setLatLng(interpolated);
-        map.panTo(interpolated, { animate: false });
+        if (lng > 180) {
+          lng -= 360;
+        } else if (lng < -180) {
+          lng += 360;
+        }
+
+        issMarker.setLatLng({ lat, lng });
 
         if (progress < 1) {
           animationFrameId = requestAnimationFrame(step);
@@ -185,37 +209,45 @@
     }
 
     async function fetchIssPosition() {
-      const response = await fetch("http://api.open-notify.org/iss-now.json", {
-        cache: "no-store",
-      });
+      let lastError = null;
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      for (const endpoint of ISS_API_ENDPOINTS) {
+        try {
+          const response = await fetch(endpoint, { cache: "no-store" });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const data = await response.json();
+
+          if (
+            data.message !== "success" ||
+            !data.iss_position ||
+            typeof data.iss_position.latitude === "undefined" ||
+            typeof data.iss_position.longitude === "undefined"
+          ) {
+            throw new Error("Unexpected API response");
+          }
+
+          const lat = Number.parseFloat(data.iss_position.latitude);
+          const lng = Number.parseFloat(data.iss_position.longitude);
+
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            throw new Error("Invalid coordinates");
+          }
+
+          return {
+            lat,
+            lng,
+            timestamp: Number(data.timestamp || Math.floor(Date.now() / 1000)),
+          };
+        } catch (error) {
+          lastError = error;
+        }
       }
 
-      const data = await response.json();
-
-      if (
-        data.message !== "success" ||
-        !data.iss_position ||
-        typeof data.iss_position.latitude === "undefined" ||
-        typeof data.iss_position.longitude === "undefined"
-      ) {
-        throw new Error("Unexpected API response");
-      }
-
-      const lat = Number.parseFloat(data.iss_position.latitude);
-      const lng = Number.parseFloat(data.iss_position.longitude);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        throw new Error("Invalid coordinates");
-      }
-
-      return {
-        lat,
-        lng,
-        timestamp: Number(data.timestamp || Math.floor(Date.now() / 1000)),
-      };
+      throw lastError || new Error("Unable to fetch ISS data");
     }
 
     async function refreshIss() {
@@ -232,7 +264,7 @@
           issMarker = L.marker([nextPosition.lat, nextPosition.lng], { icon: issIcon }).addTo(map);
           map.setView([nextPosition.lat, nextPosition.lng], 4);
         } else if (previousPosition) {
-          animateMarker(previousPosition, nextPosition, 4500);
+          animateMarker(previousPosition, nextPosition, MARKER_ANIMATION_MS);
         }
 
         previousPosition = { lat: nextPosition.lat, lng: nextPosition.lng };
@@ -241,7 +273,7 @@
         const message = error instanceof Error ? error.message : "Unable to fetch ISS data";
         setStatus(
           "error",
-          `Request failed. This can happen on HTTPS sites due to mixed-content/CORS restrictions. (${message})`
+          `Request failed. Endpoint unavailable or blocked by browser policy. (${message})`
         );
       } finally {
         isFetching = false;
@@ -250,7 +282,7 @@
 
     setStatus("init", "Bootstrapping map and telemetry");
     refreshIss();
-    setInterval(refreshIss, 5000);
+    setInterval(refreshIss, POLL_INTERVAL_MS);
   </script>
 </body>
 </html>
