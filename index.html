@@ -37,9 +37,16 @@
   <div class="relative min-h-screen overflow-hidden pb-56 sm:pb-64 lg:pb-0">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(56,189,248,0.15),transparent_35%),radial-gradient(circle_at_80%_10%,rgba(14,116,144,0.15),transparent_30%),radial-gradient(circle_at_50%_100%,rgba(15,23,42,0.85),rgba(2,6,23,1))]"></div>
 
-    <div id="proximityBanner" class="pointer-events-none absolute left-1/2 top-4 z-30 hidden -translate-x-1/2 rounded-xl border border-amber-300/70 bg-amber-500/20 px-5 py-2 text-sm font-bold tracking-[0.2em] text-amber-100 shadow-[0_0_30px_rgba(251,191,36,0.35)] sm:text-base">
+    <div
+      id="proximityBanner"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      class="pointer-events-none absolute left-1/2 top-4 z-30 hidden -translate-x-1/2 rounded-xl border border-amber-300/70 bg-amber-500/20 px-5 py-2 text-sm font-bold tracking-[0.2em] text-amber-100 shadow-[0_0_30px_rgba(251,191,36,0.35)] sm:text-base"
+    >
       ISS VISIBLE SOON
     </div>
+    <div id="proximityLive" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <main class="relative z-10 grid min-h-screen grid-cols-1 lg:grid-cols-[1fr_360px]">
       <section class="p-4 lg:p-6">
@@ -94,6 +101,13 @@
               <h2 class="text-sm font-semibold uppercase tracking-[0.12em] text-cyan-200">Who is in Space?</h2>
               <p id="astroCount" class="text-xs text-slate-300">-- currently in space</p>
             </div>
+            <button
+              id="refreshAstrosBtn"
+              type="button"
+              class="mt-2 inline-flex items-center rounded-md border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-400/15 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Refresh Astronauts
+            </button>
             <p id="astroStatus" class="mt-2 text-xs text-slate-500">Loading astronaut manifest...</p>
             <ul id="astroList" class="mt-3 max-h-52 space-y-2 overflow-y-auto pr-1 text-sm"></ul>
           </section>
@@ -101,6 +115,7 @@
           <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-4 text-xs text-slate-400">
             <p>Source: <code class="text-cyan-300">Open Notify (HTTPS-safe proxy on secure pages)</code></p>
             <p class="mt-2">Polling interval: <span class="text-slate-200">5 seconds</span></p>
+            <p class="mt-2">Astronaut refresh: <span class="text-slate-200">5 minutes</span></p>
           </section>
         </div>
       </aside>
@@ -140,9 +155,10 @@
         : [OPEN_NOTIFY_ASTROS_URL, OPEN_NOTIFY_ASTROS_PROXY_URL];
 
     const POLL_INTERVAL_MS = 5000;
-    const ASTRO_REFRESH_MS = 5000;
+    const ASTRO_REFRESH_MS = 5 * 60 * 1000;
     const MARKER_ANIMATION_MS = 4500;
     const PROXIMITY_THRESHOLD_KM = 1000;
+    const ASTRO_MANUAL_REFRESH_COOLDOWN_MS = 10000;
 
     const statusEl = document.getElementById("status");
     const statusMessageEl = document.getElementById("statusMessage");
@@ -154,7 +170,9 @@
     const astroCountEl = document.getElementById("astroCount");
     const astroStatusEl = document.getElementById("astroStatus");
     const astroListEl = document.getElementById("astroList");
+    const refreshAstrosBtnEl = document.getElementById("refreshAstrosBtn");
     const proximityBannerEl = document.getElementById("proximityBanner");
+    const proximityLiveEl = document.getElementById("proximityLive");
 
     const map = L.map("map", {
       zoomControl: true,
@@ -194,6 +212,8 @@
     let userPosition = null;
     let userLocationStatus = "pending";
     let latestIssPosition = null;
+    let userLocationWatchId = null;
+    let astroManualCooldownTimerId = null;
 
     function setStatus(kind, message = "") {
       const palette = {
@@ -234,9 +254,16 @@
     function setProximityBannerVisible(isVisible) {
       if (isVisible) {
         proximityBannerEl.classList.remove("hidden");
+        proximityLiveEl.textContent = "ISS visible soon";
       } else {
         proximityBannerEl.classList.add("hidden");
+        proximityLiveEl.textContent = "";
       }
+    }
+
+    function setAstroRefreshButtonState({ disabled, label }) {
+      refreshAstrosBtnEl.disabled = disabled;
+      refreshAstrosBtnEl.textContent = label;
     }
 
     function renderAstronautList(people) {
@@ -433,7 +460,11 @@
         return;
       }
 
-      navigator.geolocation.getCurrentPosition(
+      if (typeof userLocationWatchId === "number") {
+        navigator.geolocation.clearWatch(userLocationWatchId);
+      }
+
+      userLocationWatchId = navigator.geolocation.watchPosition(
         (position) => {
           userPosition = {
             lat: position.coords.latitude,
@@ -498,9 +529,10 @@
       }
     }
 
-    async function refreshAstros() {
+    async function refreshAstros({ manual = false } = {}) {
       if (isAstroFetching) return;
       isAstroFetching = true;
+      setAstroRefreshButtonState({ disabled: true, label: "Refreshing..." });
 
       try {
         setAstroStatus("Updating astronaut manifest...", "text-cyan-300");
@@ -517,16 +549,41 @@
         setAstroStatus(`Failed to load astronaut list. (${message})`, "text-rose-300");
       } finally {
         isAstroFetching = false;
+
+        if (manual) {
+          if (astroManualCooldownTimerId) {
+            clearTimeout(astroManualCooldownTimerId);
+          }
+          setAstroRefreshButtonState({ disabled: true, label: "Try again shortly" });
+          astroManualCooldownTimerId = setTimeout(() => {
+            astroManualCooldownTimerId = null;
+            setAstroRefreshButtonState({ disabled: false, label: "Refresh Astronauts" });
+          }, ASTRO_MANUAL_REFRESH_COOLDOWN_MS);
+        } else if (!astroManualCooldownTimerId) {
+          setAstroRefreshButtonState({ disabled: false, label: "Refresh Astronauts" });
+        }
       }
     }
 
     setStatus("init", "Bootstrapping map and telemetry");
+    setAstroRefreshButtonState({ disabled: false, label: "Refresh Astronauts" });
+    refreshAstrosBtnEl.addEventListener("click", () => {
+      if (refreshAstrosBtnEl.disabled) return;
+      refreshAstros({ manual: true });
+    });
+
     requestUserLocation();
     refreshIss();
     refreshAstros();
 
     setInterval(refreshIss, POLL_INTERVAL_MS);
     setInterval(refreshAstros, ASTRO_REFRESH_MS);
+
+    window.addEventListener("beforeunload", () => {
+      if (typeof userLocationWatchId === "number") {
+        navigator.geolocation.clearWatch(userLocationWatchId);
+      }
+    });
   </script>
 </body>
 </html>
